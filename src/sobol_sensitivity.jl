@@ -74,6 +74,9 @@ end
 res2 = gsa(ishi_batch,Sobol(),A,B,batch=true)
 ```
 """
+
+using Infiltrator
+
 struct Sobol <: GSAMethod
     order::Vector{Int}
     nboot::Int
@@ -109,7 +112,7 @@ end
 
 function gsa(f, method::Sobol, A::AbstractMatrix{TA}, B::AbstractMatrix;
         batch = false, Ei_estimator = :Jansen1999,
-        distributed::Val{SHARED_ARRAY} = Val(false),
+        distributed::Val{SHARED_ARRAY} = Val(false), dropnan = false,
         kwargs...) where {TA, SHARED_ARRAY}
     d, n = size(A)
     nboot = method.nboot # load to help alias analysis
@@ -139,8 +142,9 @@ function gsa(f, method::Sobol, A::AbstractMatrix{TA}, B::AbstractMatrix;
         multioutput = all_y isa AbstractMatrix
         y_size = nothing
         gsa_sobol_all_y_analysis(method, all_y, d, n, Ei_estimator, y_size,
-            Val(multioutput))
+            Val(multioutput), dropnan = dropnan)
     else
+        @infiltrate
         _y = [f(all_points[:, i]) for i in 1:size(all_points, 2)]
         multioutput = !(eltype(_y) <: Number)
         if eltype(_y) <: RecursiveArrayTools.AbstractVectorOfArray
@@ -151,14 +155,32 @@ function gsa(f, method::Sobol, A::AbstractMatrix{TA}, B::AbstractMatrix;
         end
         if multioutput
             gsa_sobol_all_y_analysis(method, reduce(hcat, _y), d, n, Ei_estimator, y_size,
-                Val(true))
+                Val(true), dropnan = dropnan)
         else
-            gsa_sobol_all_y_analysis(method, _y, d, n, Ei_estimator, y_size, Val(false))
+            gsa_sobol_all_y_analysis(method, _y, d, n, Ei_estimator, y_size, Val(false), dropnan = dropnan)
         end
     end
 end
 function gsa_sobol_all_y_analysis(method, all_y::AbstractArray{T}, d, n, Ei_estimator,
-        y_size, ::Val{multioutput}) where {T, multioutput}
+        y_size, ::Val{multioutput}; dropnan = false) where {T, multioutput}
+    @infiltrate
+    if dropnan
+        # Two cases: multioutput (matrix) and not multioutput (vector). Not multioutput is easy, just dropna.
+        # Multioutput is a bit more complex, we need to dropna for each column. But a matrix 
+        # can't handle droppingna for each column, so we need to convert to a vector of vectors (?).
+        if multioutput
+            all_y = dropnan(all_y)
+        else
+            nan_mask = isnan.(all_y)
+            nan_idx = findall(nan_mask)
+            nonnan_mask = .!nan_mask
+            nonnan_idx = findall(nonnan_mask)
+            if sum(.!nan_idx) == 0
+                throw(ArgumentError("All values are NaN"))
+            end
+        end
+    end
+
     nboot = method.nboot
     Eys = multioutput ? Matrix{T}[] : T[]
     Varys = multioutput ? Matrix{T}[] : T[]
@@ -168,14 +190,40 @@ function gsa_sobol_all_y_analysis(method, all_y::AbstractArray{T}, d, n, Ei_esti
     step = 2 in method.order ? 2 * d + 2 : d + 2
     if !multioutput
         for i in 1:step:(step * nboot)
-            push!(Eys, mean(all_y[((i - 1) * n + 1):((i + 1) * n)]))
-            push!(Varys, var(all_y[((i - 1) * n + 1):((i + 1) * n)]))
+            indices = ((i - 1) * n + 1):((i + 1) * n)
+            if dropnan
+                indices = intersect(indices, nonnan_idx)
+            end
+            push!(Eys, mean(all_y[indices]))
+            push!(Varys, var(all_y[indices]))
 
-            fA = all_y[((i - 1) * n + 1):(i * n)]
-            fB = all_y[(i * n + 1):((i + 1) * n)]
-            fAⁱ = [all_y[(j * n + 1):((j + 1) * n)] for j in (i + 1):(i + d)]
+            indices_fA = ((i - 1) * n + 1):(i * n)
+            indices_fB = (i * n + 1):((i + 1) * n)
+            if dropnan
+                indices_fA = intersect(indices_fA, nonnan_idx)
+                indices_fB = intersect(indices_fB, nonnan_idx)
+            end
+
+            fA = all_y[indices_fA]
+            fB = all_y[indices_fB]
+            fAⁱ = []
+            for j in (i + 1):(i + d)
+                indices_fAⁱ = ((j - 1) * n + 1):(j * n)
+                if dropnan
+                    indices_fAⁱ = intersect(indices_fAⁱ, nonnan_idx)
+                end
+                push!(fAⁱ, all_y[indices_fAⁱ])
+            end
+            
             if 2 in method.order
-                fBⁱ = [all_y[(j * n + 1):((j + 1) * n)] for j in (i + d + 1):(i + 2 * d)]
+                fBⁱ = []
+                for j in (i + d + 1):(i + 2 * d)
+                    indices_fBⁱ = (j * n + 1):((j + 1) * n)
+                    if dropnan
+                        indices_fBⁱ = intersect(indices_fBⁱ, nonnan_idx)
+                    end
+                    push!(fBⁱ, all_y[indices_fBⁱ])
+                end
             end
 
             push!(Vᵢs, [sum(fB .* (fAⁱ[k] .- fA)) for k in 1:d] ./ n)
@@ -342,12 +390,12 @@ function gsa_sobol_all_y_analysis(method, all_y::AbstractArray{T}, d, n, Ei_esti
         nboot > 1 ? reshape(ST_CI, size_...) : nothing)
 end
 
-function gsa(f, method::Sobol, p_range::AbstractVector; samples, kwargs...)
+function gsa(f, method::Sobol, p_range::AbstractVector; dropnan = false, samples, kwargs...)
     AB = QuasiMonteCarlo.generate_design_matrices(samples, [i[1] for i in p_range],
         [i[2] for i in p_range],
         QuasiMonteCarlo.SobolSample(),
         2 * method.nboot)
     A = reduce(hcat, @view(AB[1:(method.nboot)]))
     B = reduce(hcat, @view(AB[(method.nboot + 1):end]))
-    gsa(f, method, A, B; kwargs...)
+    gsa(f, method, A, B; dropnan = dropnan, kwargs...)
 end
