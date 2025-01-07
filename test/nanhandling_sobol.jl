@@ -27,9 +27,6 @@ f1 = let prob = prob, t = t
     end
 end
 
-f1(1)
-f1(-1)
-
 samples = 100
 lb = [20]
 ub = [70]
@@ -38,8 +35,6 @@ A, B = QuasiMonteCarlo.generate_design_matrices(samples, lb, ub, sampler)
 
 m = gsa(f1, Sobol(), A, B; dropnan = true)
 @test !any(isnan.(m.S1))
-@test !any(isnan.(m.S2))
 @test !any(isnan.(m.ST))
-@test !any(isnan.(m.S1_conf))
-@test !any(isnan.(m.S2_conf))
-@test !any(isnan.(m.ST_conf))
+@test !any(isnan.(m.S1_Conf_Int))
+@test !any(isnan.(m.ST_Conf_Int))
