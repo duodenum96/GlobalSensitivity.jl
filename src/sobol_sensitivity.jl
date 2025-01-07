@@ -175,7 +175,7 @@ function gsa_sobol_all_y_analysis(method, all_y::AbstractArray{T}, d, n, Ei_esti
             nan_idx = findall(nan_mask)
             nonnan_mask = .!nan_mask
             nonnan_idx = findall(nonnan_mask)
-            if sum(.!nan_idx) == 0
+            if sum(nonnan_mask) == 0
                 throw(ArgumentError("All values are NaN"))
             end
         end
